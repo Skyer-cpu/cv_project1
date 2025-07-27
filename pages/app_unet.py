@@ -2,8 +2,6 @@ import streamlit as st
 import os
 import numpy as np
 from PIL import Image
-import requests
-from io import BytesIO
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
@@ -15,10 +13,13 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import gdown
 
-# Проверяем доступность GPU (без вывода в Streamlit на этом этапе)
+# Инициализация Streamlit (должен быть первым)
+st.set_page_config(page_title="UNet Segmentation", layout="wide")
+
+# Проверяем доступность GPU
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-### MODEL ARCHITECTURE ###
+### MODEL ARCHITECTURE (без изменений) ###
 class UNet(nn.Module):
     def __init__(self, in_channels=3, out_channels=1, features=(64,128,256,512)):
         super().__init__()
@@ -95,11 +96,11 @@ class UNetLitModule(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
 
-### MODEL DOWNLOAD ###
+### УЛУЧШЕННАЯ ЗАГРУЗКА МОДЕЛИ ###
 @st.cache_resource
 def download_model():
     """Загружает модель с Google Drive"""
-    MODEL_URL = "https://drive.google.com/uc?id=1zVFsP3idy0gk7JHfpnS52jdlhknCboXC"
+    MODEL_ID = "1zVFsP3idy0gk7JHfpnS52jdlhknCboXC"
     MODEL_DIR = "models"
     MODEL_NAME = "unet_9_epoch.ckpt"
     MODEL_PATH = os.path.join(MODEL_DIR, MODEL_NAME)
@@ -109,45 +110,57 @@ def download_model():
     if not os.path.exists(MODEL_PATH):
         try:
             with st.spinner('Скачивание модели с Google Drive (372 МБ)...'):
-                gdown.download(MODEL_URL, MODEL_PATH, quiet=False)
+                # Альтернативный способ скачивания больших файлов
+                output = f"{MODEL_DIR}/{MODEL_NAME}"
+                gdown.download(f"https://drive.google.com/uc?id={MODEL_ID}", output, quiet=False)
+                
+                # Проверка успешности скачивания
+                if not os.path.exists(MODEL_PATH):
+                    st.error("Файл модели не был скачан. Попробуйте вручную:")
+                    st.markdown(f"[Скачать модель](https://drive.google.com/uc?export=download&id={MODEL_ID})")
+                    st.stop()
+                    
                 st.success("Модель успешно загружена!")
         except Exception as e:
             st.error(f"Ошибка загрузки модели: {e}")
+            st.error("Попробуйте вручную скачать модель и поместить в папку models/")
             st.stop()
     
     return MODEL_PATH
 
-### MODEL LOADING ###
 @st.cache_resource
 def load_model():
     """Загружает и кэширует модель"""
     try:
         model_path = download_model()
         
-        # Проверяем, что файл модели существует и не пустой
-        if not os.path.exists(model_path) or os.path.getsize(model_path) == 0:
-            st.error("Файл модели не найден или пустой. Пожалуйста, проверьте путь.")
+        # Проверка файла модели
+        if not os.path.exists(model_path):
+            st.error(f"Файл модели не найден: {model_path}")
+            st.stop()
+            
+        if os.path.getsize(model_path) == 0:
+            st.error("Файл модели пустой. Удалите его и попробуйте снова.")
             st.stop()
         
-        # Загружаем модель с обработкой ошибок
-        lit_model = UNetLitModule.load_from_checkpoint(
+        # Загрузка модели
+        model = UNetLitModule.load_from_checkpoint(
             model_path,
             map_location=DEVICE
         )
         
-        lit_model.eval()
-        lit_model.freeze()
-        lit_model.to(DEVICE)
+        model.eval()
+        model.freeze()
+        model.to(DEVICE)
         
-        st.success("Модель успешно загружена и готова к использованию!")
-        return lit_model
+        return model
         
     except Exception as e:
-        st.error(f"Ошибка при загрузке модели: {str(e)}")
+        st.error(f"Критическая ошибка при загрузке модели: {str(e)}")
         st.stop()
 
-### PREDICTION UTILS ###
-def get_val_transform(size: int = 256):
+### ФУНКЦИИ ДЛЯ ПРЕДСКАЗАНИЯ ###
+def get_val_transform(size=256):
     return A.Compose([
         A.Resize(size, size),
         A.Normalize(mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0)),
@@ -155,119 +168,115 @@ def get_val_transform(size: int = 256):
     ])
 
 @torch.no_grad()
-def overlay_prediction_only(img_path: str, model: torch.nn.Module, transform=None, 
-                          threshold: float = 0.5, alpha: float = 0.4,
-                          figsize: tuple = (12, 12), dpi: int = 100):
-    try:
-        img = np.array(Image.open(img_path).convert("RGB"))
-        H, W = img.shape[:2]
-        
-        if transform is None:
-            transform = get_val_transform()
-            
-        inp = transform(image=img)["image"].unsqueeze(0).to(DEVICE)
-        
-        logits = model(inp)
-        probs  = torch.sigmoid(logits)[0, 0].cpu().numpy()
-        pred_mask = (probs > threshold).astype(float)
-        avg_conf = probs.mean() * 100
-        
-        pred_mask_img = Image.fromarray((pred_mask * 255).astype(np.uint8)).resize((W, H), resample=Image.NEAREST)
-        pred_mask = np.array(pred_mask_img) / 255.0
-        
-        base_img = img / 255.0
-        overlay = np.zeros((H, W, 4))
-        overlay[..., 2] = pred_mask  # Красный цвет для маски
-        overlay[..., 3] = alpha * pred_mask
-        
-        fig, ax = plt.subplots(1, 2, figsize=figsize, dpi=dpi)
-        ax[0].imshow(base_img)
-        ax[0].axis("off")
-        ax[0].set_title("Исходное изображение")
-        
-        ax[1].imshow(base_img)
-        ax[1].imshow(overlay)
-        ax[1].axis("off")
-        ax[1].set_title(f"Сегментация (уверенность: {avg_conf:.1f}%)")
-        
-        plt.tight_layout()
-        return fig
-        
-    except Exception as e:
-        st.error(f"Ошибка при обработке изображения: {str(e)}")
-        return None
-
-### STREAMLIT APP ###
-def main():
-    # Должен быть ПЕРВЫМ вызовом в приложении
-    st.set_page_config(page_title="UNet Segmentation", layout="wide")
+def process_prediction(img_path, model, transform, threshold=0.5):
+    """Обработка одного изображения"""
+    img = np.array(Image.open(img_path).convert("RGB"))
+    H, W = img.shape[:2]
     
+    # Преобразование изображения
+    inp = transform(image=img)["image"].unsqueeze(0).to(DEVICE)
+    
+    # Предсказание
+    logits = model(inp)
+    probs = torch.sigmoid(logits)[0, 0].cpu().numpy()
+    pred_mask = (probs > threshold).astype(float)
+    avg_conf = probs.mean() * 100
+    
+    return img, pred_mask, avg_conf
+
+def create_visualization(img, pred_mask, avg_conf, alpha=0.4):
+    """Создание визуализации результатов"""
+    H, W = img.shape[:2]
+    base_img = img / 255.0
+    
+    # Создание маски с прозрачностью
+    overlay = np.zeros((H, W, 4))
+    overlay[..., 2] = pred_mask  # Красный канал
+    overlay[..., 3] = alpha * pred_mask  # Альфа-канал
+    
+    # Создание фигуры
+    fig, ax = plt.subplots(1, 2, figsize=(12, 6))
+    
+    # Оригинальное изображение
+    ax[0].imshow(base_img)
+    ax[0].axis("off")
+    ax[0].set_title("Исходное изображение")
+    
+    # Результат сегментации
+    ax[1].imshow(base_img)
+    ax[1].imshow(overlay)
+    ax[1].axis("off")
+    ax[1].set_title(f"Сегментация (уверенность: {avg_conf:.1f}%)")
+    
+    plt.tight_layout()
+    return fig
+
+### ОСНОВНОЕ ПРИЛОЖЕНИЕ ###
+def main():
     st.title("UNet модель для сегментации аэрофотоснимков лесов")
     st.info(f"Используется устройство: {DEVICE.upper()}")
     
     # Загрузка модели
     if "model" not in st.session_state:
-        st.session_state.model = load_model()
+        with st.spinner("Загрузка модели..."):
+            st.session_state.model = load_model()
+            st.session_state.transform = get_val_transform()
     
-    # Настройки в сайдбаре
+    # Параметры в сайдбаре
     st.sidebar.header("Параметры сегментации")
     threshold = st.sidebar.slider("Порог уверенности", 0.0, 1.0, 0.5, 0.01)
     alpha = st.sidebar.slider("Прозрачность маски", 0.0, 1.0, 0.4, 0.05)
     
     # Загрузка изображения
     st.header("Загрузите изображение для сегментации")
-    uploaded = st.file_uploader("Выберите файл", type=["jpg", "png", "jpeg"], accept_multiple_files=False)
+    uploaded = st.file_uploader("Выберите файл", type=["jpg", "png", "jpeg"])
     
     if uploaded is not None:
         try:
             # Сохраняем временный файл
-            tmp_path = "temp_input.png"
-            with open(tmp_path, "wb") as f:
+            temp_path = "temp_input.png"
+            with open(temp_path, "wb") as f:
                 f.write(uploaded.getbuffer())
             
             # Обработка изображения
-            with st.spinner("Обработка изображения..."):
-                fig = overlay_prediction_only(
-                    img_path=tmp_path,
-                    model=st.session_state.model,
-                    transform=get_val_transform(),
-                    threshold=threshold,
-                    alpha=alpha,
-                    figsize=(10, 5),
-                    dpi=100
+            with st.spinner("Анализ изображения..."):
+                img, pred_mask, avg_conf = process_prediction(
+                    temp_path,
+                    st.session_state.model,
+                    st.session_state.transform,
+                    threshold
                 )
                 
-                if fig is not None:
-                    st.pyplot(fig)
-                    plt.close(fig)
+                fig = create_visualization(img, pred_mask, avg_conf, alpha)
+                st.pyplot(fig)
+                plt.close(fig)
             
-            # Удаляем временный файл
-            os.remove(tmp_path)
+            # Расчет площади
+            tumor_area = pred_mask.sum()
+            st.info(f"Обнаружена площадь: {tumor_area:.0f} пикселей ({tumor_area/(img.shape[0]*img.shape[1]):.1%} изображения)")
+            
+            # Удаление временного файла
+            os.remove(temp_path)
             
         except Exception as e:
-            st.error(f"Ошибка при обработке файла: {str(e)}")
+            st.error(f"Ошибка обработки: {str(e)}")
     
-    # Отображение метрик обучения
-    st.header("Метрики обучения модели")
+    # Метрики обучения
+    st.header("Метрики обучения")
     metrics_dir = "images/unet"
-    
-    if os.path.isdir(metrics_dir):
+    if os.path.exists(metrics_dir):
         cols = st.columns(2)
-        metric_images = sorted([f for f in os.listdir(metrics_dir) if f.lower().endswith((".png", ".jpg", ".jpeg"))])
+        metrics = sorted([f for f in os.listdir(metrics_dir) if f.endswith((".png", ".jpg", ".jpeg"))])
         
-        for idx, img_name in enumerate(metric_images):
-            img_path = os.path.join(metrics_dir, img_name)
-            with cols[idx % 2]:
+        for i, metric in enumerate(metrics):
+            with cols[i % 2]:
                 try:
-                    st.image(
-                        Image.open(img_path),
-                        caption=os.path.splitext(img_name)[0].replace("_", " ").title(),
-                        use_container_width=True
-                    )
-                except Exception as e:
-                    st.error(f"Не удалось загрузить изображение {img_name}: {str(e)}")
-    else:
-        st.warning("Директория с метриками обучения не найдена.")
+                    img = Image.open(os.path.join(metrics_dir, metric))
+                    # Заменено use_column_width на use_container_width
+                    st.image(img, caption=metric.split(".")[0], use_container_width=True)
+                except:
+                    st.warning(f"Не удалось загрузить {metric}")
 
 if __name__ == "__main__":
     main()
+
