@@ -14,6 +14,7 @@ from albumentations.pytorch import ToTensorV2
 import zipfile
 import io
 import shutil
+import cv2
 
 # Увеличиваем лимит размера загружаемых файлов до 500MB
 from streamlit.runtime.uploaded_file_manager import UploadedFile
@@ -162,6 +163,67 @@ def handle_model_upload(uploaded_file):
     
     return model_path
 
+### ФУНКЦИИ ДЛЯ ПРЕДСКАЗАНИЯ ###
+def get_val_transform(size=256):
+    return A.Compose([
+        A.Resize(size, size),
+        A.Normalize(mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0)),
+        ToTensorV2(),
+    ])
+
+@torch.no_grad()
+def process_prediction(img_path, model, transform, threshold=0.5):
+    """Обработка одного изображения с масштабированием маски"""
+    # Загрузка изображения
+    img = np.array(Image.open(img_path).convert("RGB"))
+    original_size = img.shape[:2]  # Сохраняем оригинальный размер
+    
+    # Применяем трансформации
+    transformed = transform(image=img)
+    inp = transformed["image"].unsqueeze(0).to(DEVICE)
+    
+    # Получаем предсказание
+    logits = model(inp)
+    probs = torch.sigmoid(logits)[0, 0].cpu().numpy()
+    
+    # Масштабируем маску к оригинальному размеру
+    pred_mask = (probs > threshold).astype(np.float32)
+    pred_mask = cv2.resize(pred_mask, (original_size[1], original_size[0]), 
+                         interpolation=cv2.INTER_LINEAR)
+    
+    # Средняя уверенность
+    avg_conf = probs.mean() * 100
+    
+    return img, pred_mask, avg_conf
+
+def create_visualization(img, pred_mask, avg_conf, alpha=0.4):
+    """Создание визуализации с улучшенным отображением"""
+    # Нормализация изображения
+    if img.max() > 1.0:
+        img = img.astype(np.float32) / 255.0
+    
+    # Создаем overlay для маски
+    overlay = np.zeros((*pred_mask.shape, 4), dtype=np.float32)
+    overlay[..., 0] = 1.0  # Красный канал
+    overlay[..., 3] = pred_mask * alpha  # Альфа-канал
+    
+    # Создаем фигуру
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+    
+    # Оригинальное изображение
+    ax1.imshow(img)
+    ax1.set_title("Исходное изображение")
+    ax1.axis('off')
+    
+    # Наложение маски
+    ax2.imshow(img)
+    ax2.imshow(overlay, alpha=alpha)
+    ax2.set_title(f"Сегментация (уверенность: {avg_conf:.1f}%)")
+    ax2.axis('off')
+    
+    plt.tight_layout()
+    return fig
+
 ### ОСНОВНОЕ ПРИЛОЖЕНИЕ ###
 def main():
     st.title("UNet модель для сегментации аэрофотоснимков лесов")
@@ -173,41 +235,26 @@ def main():
     
     # Сайдбар для загрузки модели
     st.sidebar.header("Загрузка модели")
-    
-    # Простая кнопка выбора файла без перетаскивания
     model_file = st.sidebar.file_uploader(
         "Выберите файл модели (unet_9_epoch.ckpt или .zip)", 
         type=["ckpt", "zip"],
-        help="""Модель можно скачать по ссылке:
-               https://drive.google.com/uc?export=download&id=1zVFsP3idy0gk7JHfpnS52jdlhknCboXC"""
+        help="Модель можно скачать по ссылке: https://drive.google.com/uc?export=download&id=1zVFsP3idy0gk7JHfpnS52jdlhknCboXC"
     )
     
     # Обработка загруженной модели
     if model_file is not None:
-        file_size = len(model_file.getvalue()) / (1024 * 1024)  # Размер в MB
-        
-        if file_size > 500:
-            st.sidebar.error("Файл слишком большой. Максимальный размер: 500MB")
-        else:
-            with st.spinner("Обработка модели..."):
-                model_path = handle_model_upload(model_file)
-                if model_path:
-                    st.session_state.model = load_model_from_path(model_path)
-                    if st.session_state.model:
-                        st.sidebar.success(f"Модель успешно загружена! Размер: {file_size:.1f}MB")
-                    else:
-                        st.sidebar.error("Ошибка загрузки модели")
+        with st.spinner("Обработка модели..."):
+            model_path = handle_model_upload(model_file)
+            if model_path:
+                st.session_state.model = load_model_from_path(model_path)
+                if st.session_state.model:
+                    file_size = os.path.getsize(model_path) / (1024 * 1024)
+                    st.sidebar.success(f"Модель успешно загружена! Размер: {file_size:.1f}MB")
+                else:
+                    st.sidebar.error("Ошибка загрузки модели")
     
-    # Проверка загруженной модели
     if st.session_state.model is None:
-        st.warning("Модель не загружена. Пожалуйста, загрузите модель")
-        st.markdown("""
-            ### Инструкция:
-            1. Скачайте модель по [ссылке](https://drive.google.com/uc?export=download&id=1zVFsP3idy0gk7JHfpnS52jdlhknCboXC)
-            2. Нажмите "Browse files" в разделе "Загрузка модели" слева
-            3. Выберите скачанный файл `unet_9_epoch.ckpt` (до 500MB)
-            4. Дождитесь загрузки модели
-        """)
+        st.warning("Пожалуйста, загрузите модель для сегментации")
         return
     
     # Параметры сегментации
@@ -218,19 +265,19 @@ def main():
     # Загрузка изображения
     st.header("Загрузите изображение для сегментации")
     uploaded_img = st.file_uploader(
-        "Выберите изображение", 
-        type=["jpg", "png", "jpeg"]
+        "Выберите изображение (JPG, PNG)", 
+        type=["jpg", "jpeg", "png"]
     )
     
     if uploaded_img is not None:
         try:
-            with st.spinner("Анализ изображения..."):
-                # Сохраняем временный файл
+            with st.spinner("Обработка изображения..."):
+                # Временный файл
                 temp_path = "temp_input.png"
                 with open(temp_path, "wb") as f:
                     f.write(uploaded_img.getbuffer())
                 
-                # Обработка изображения
+                # Обработка и визуализация
                 img, pred_mask, avg_conf = process_prediction(
                     temp_path,
                     st.session_state.model,
@@ -238,71 +285,20 @@ def main():
                     threshold
                 )
                 
-                # Визуализация
                 fig = create_visualization(img, pred_mask, avg_conf, alpha)
                 st.pyplot(fig)
                 plt.close(fig)
                 
                 # Расчет площади
-                area = pred_mask.sum()
-                st.info(f"Обнаружена площадь: {area:.0f} пикселей ({area/(img.shape[0]*img.shape[1]):.1%} изображения)")
+                area_pixels = pred_mask.sum()
+                area_percent = area_pixels / (img.shape[0] * img.shape[1])
+                st.success(f"Обнаружена площадь: {area_pixels:.0f} пикселей ({area_percent:.1%} изображения)")
                 
-                # Удаление временного файла
                 os.remove(temp_path)
                 
         except Exception as e:
             st.error(f"Ошибка обработки: {str(e)}")
-    
-    # Метрики обучения
-    st.header("Метрики обучения")
-    metrics_dir = "images/unet"
-    if os.path.exists(metrics_dir):
-        cols = st.columns(2)
-        for i, metric in enumerate(sorted(f for f in os.listdir(metrics_dir) if f.endswith((".png", ".jpg", ".jpeg")))):
-            with cols[i % 2]:
-                try:
-                    img = Image.open(os.path.join(metrics_dir, metric))
-                    st.image(img, caption=metric.split(".")[0], use_container_width=True)
-                except:
-                    st.warning(f"Не удалось загрузить {metric}")
-
-### ФУНКЦИИ ДЛЯ ПРЕДСКАЗАНИЯ ###
-def get_val_transform(size=256):
-    return A.Compose([
-        A.Resize(size, size),
-        A.Normalize(mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0)),
-        ToTensorV2(),
-    ])
-
-@torch.no_grad()
-def process_prediction(img_path, model, transform, threshold=0.5):
-    """Обработка одного изображения"""
-    img = np.array(Image.open(img_path).convert("RGB"))
-    inp = transform(image=img)["image"].unsqueeze(0).to(DEVICE)
-    logits = model(inp)
-    probs = torch.sigmoid(logits)[0, 0].cpu().numpy()
-    pred_mask = (probs > threshold).astype(float)
-    avg_conf = probs.mean() * 100
-    return img, pred_mask, avg_conf
-
-def create_visualization(img, pred_mask, avg_conf, alpha=0.4):
-    """Создание визуализации результатов"""
-    H, W = img.shape[:2]
-    base_img = img / 255.0
-    overlay = np.zeros((H, W, 4))
-    overlay[..., 2] = pred_mask  # Красный канал
-    overlay[..., 3] = alpha * pred_mask  # Альфа-канал
-    
-    fig, ax = plt.subplots(1, 2, figsize=(12, 6))
-    ax[0].imshow(base_img)
-    ax[0].axis("off")
-    ax[0].set_title("Исходное изображение")
-    ax[1].imshow(base_img)
-    ax[1].imshow(overlay)
-    ax[1].axis("off")
-    ax[1].set_title(f"Сегментация (уверенность: {avg_conf:.1f}%)")
-    plt.tight_layout()
-    return fig
+            st.error("Попробуйте загрузить другое изображение")
 
 if __name__ == "__main__":
     main()
