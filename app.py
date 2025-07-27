@@ -11,6 +11,7 @@ except ImportError as e:
     subprocess.run([sys.executable, "-m", "pip", "install", "opencv-python-headless==4.9.0.80", "ultralytics==8.1.0"], check=True)
     import cv2
     from ultralytics import YOLO
+    
 import streamlit as st
 from PIL import Image
 import pandas as pd
@@ -21,7 +22,13 @@ import os
 import matplotlib.pyplot as plt
 import requests
 from io import BytesIO
-#
+try:
+    import pytorch_lightning as pl
+except ImportError:
+    import subprocess
+    import sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pytorch_lightning==2.1.0"])
+    import pytorch_lightning as pl
 # Настройки страницы
 st.set_page_config(
     page_title="Команда ДДС",
