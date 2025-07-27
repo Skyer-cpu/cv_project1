@@ -15,9 +15,8 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import gdown
 
-# Проверяем доступность GPU
+# Проверяем доступность GPU (без вывода в Streamlit на этом этапе)
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-st.info(f"Используется устройство: {DEVICE.upper()}")
 
 ### MODEL ARCHITECTURE ###
 class UNet(nn.Module):
@@ -200,8 +199,11 @@ def overlay_prediction_only(img_path: str, model: torch.nn.Module, transform=Non
 
 ### STREAMLIT APP ###
 def main():
+    # Должен быть ПЕРВЫМ вызовом в приложении
     st.set_page_config(page_title="UNet Segmentation", layout="wide")
+    
     st.title("UNet модель для сегментации аэрофотоснимков лесов")
+    st.info(f"Используется устройство: {DEVICE.upper()}")
     
     # Загрузка модели
     if "model" not in st.session_state:
