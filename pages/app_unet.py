@@ -14,7 +14,6 @@ from albumentations.pytorch import ToTensorV2
 import zipfile
 import io
 import shutil
-from pathlib import Path
 
 # Увеличиваем лимит размера загружаемых файлов до 500MB
 from streamlit.runtime.uploaded_file_manager import UploadedFile
@@ -157,83 +156,11 @@ def handle_model_upload(uploaded_file):
     if uploaded_file.name.endswith('.zip'):
         model_path = extract_zip_model(uploaded_file)
     else:
-        model_path = os.path.join(MODEL_DIR, "unet_9_epoch.ckpt")
+        model_path = os.path.join(MODEL_DIR, uploaded_file.name)
         with open(model_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
     
     return model_path
-
-### КАСТОМНЫЙ ЗАГРУЗЧИК ФАЙЛОВ ###
-def large_file_uploader(label, types, help_text=None):
-    """Кастомный загрузчик файлов с правильным сообщением о лимите"""
-    # Создаем контейнер для кастомного интерфейса
-    container = st.empty()
-    
-    # Используем стандартный загрузчик, но с нашим увеличенным лимитом
-    uploaded_file = st.file_uploader(
-        label,
-        type=types,
-        help=help_text,
-        label_visibility="collapsed"  # Скрываем стандартный лейбл
-    )
-    
-    # Кастомное отображение информации о загрузке
-    if uploaded_file is None:
-        container.markdown(f"""
-            <div style='
-                border: 2px dashed #ccc;
-                border-radius: 5px;
-                padding: 25px;
-                text-align: center;
-                margin-bottom: 10px;
-            '>
-                <p>{label}</p>
-                <p style='font-size: 0.8em; color: #666;'>Поддерживаемые форматы: {', '.join(types)}</p>
-                <p style='font-size: 0.8em; color: #666;'>Максимальный размер: 500MB</p>
-            </div>
-        """, unsafe_allow_html=True)
-    else:
-        container.empty()
-        
-    return uploaded_file
-
-### ФУНКЦИИ ДЛЯ ПРЕДСКАЗАНИЯ ###
-def get_val_transform(size=256):
-    return A.Compose([
-        A.Resize(size, size),
-        A.Normalize(mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0)),
-        ToTensorV2(),
-    ])
-
-@torch.no_grad()
-def process_prediction(img_path, model, transform, threshold=0.5):
-    """Обработка одного изображения"""
-    img = np.array(Image.open(img_path).convert("RGB"))
-    inp = transform(image=img)["image"].unsqueeze(0).to(DEVICE)
-    logits = model(inp)
-    probs = torch.sigmoid(logits)[0, 0].cpu().numpy()
-    pred_mask = (probs > threshold).astype(float)
-    avg_conf = probs.mean() * 100
-    return img, pred_mask, avg_conf
-
-def create_visualization(img, pred_mask, avg_conf, alpha=0.4):
-    """Создание визуализации результатов"""
-    H, W = img.shape[:2]
-    base_img = img / 255.0
-    overlay = np.zeros((H, W, 4))
-    overlay[..., 2] = pred_mask  # Красный канал
-    overlay[..., 3] = alpha * pred_mask  # Альфа-канал
-    
-    fig, ax = plt.subplots(1, 2, figsize=(12, 6))
-    ax[0].imshow(base_img)
-    ax[0].axis("off")
-    ax[0].set_title("Исходное изображение")
-    ax[1].imshow(base_img)
-    ax[1].imshow(overlay)
-    ax[1].axis("off")
-    ax[1].set_title(f"Сегментация (уверенность: {avg_conf:.1f}%)")
-    plt.tight_layout()
-    return fig
 
 ### ОСНОВНОЕ ПРИЛОЖЕНИЕ ###
 def main():
@@ -247,24 +174,29 @@ def main():
     # Сайдбар для загрузки модели
     st.sidebar.header("Загрузка модели")
     
-    # Используем кастомный загрузчик
-    model_file = large_file_uploader(
-        "Перетащите файл модели сюда (unet_9_epoch.ckpt или .zip)",
-        types=["ckpt", "zip"],
-        help_text="""Модель можно скачать по ссылке:
-                   https://drive.google.com/uc?export=download&id=1zVFsP3idy0gk7JHfpnS52jdlhknCboXC"""
+    # Простая кнопка выбора файла без перетаскивания
+    model_file = st.sidebar.file_uploader(
+        "Выберите файл модели (unet_9_epoch.ckpt или .zip)", 
+        type=["ckpt", "zip"],
+        help="""Модель можно скачать по ссылке:
+               https://drive.google.com/uc?export=download&id=1zVFsP3idy0gk7JHfpnS52jdlhknCboXC"""
     )
     
     # Обработка загруженной модели
     if model_file is not None:
-        with st.spinner("Обработка модели..."):
-            model_path = handle_model_upload(model_file)
-            if model_path:
-                st.session_state.model = load_model_from_path(model_path)
-                if st.session_state.model:
-                    st.sidebar.success("Модель успешно загружена!")
-                else:
-                    st.sidebar.error("Ошибка загрузки модели")
+        file_size = len(model_file.getvalue()) / (1024 * 1024)  # Размер в MB
+        
+        if file_size > 500:
+            st.sidebar.error("Файл слишком большой. Максимальный размер: 500MB")
+        else:
+            with st.spinner("Обработка модели..."):
+                model_path = handle_model_upload(model_file)
+                if model_path:
+                    st.session_state.model = load_model_from_path(model_path)
+                    if st.session_state.model:
+                        st.sidebar.success(f"Модель успешно загружена! Размер: {file_size:.1f}MB")
+                    else:
+                        st.sidebar.error("Ошибка загрузки модели")
     
     # Проверка загруженной модели
     if st.session_state.model is None:
@@ -272,9 +204,9 @@ def main():
         st.markdown("""
             ### Инструкция:
             1. Скачайте модель по [ссылке](https://drive.google.com/uc?export=download&id=1zVFsP3idy0gk7JHfpnS52jdlhknCboXC)
-            2. Перетащите файл в область загрузки слева (можно ZIP-архив)
-            3. Или поместите файл `unet_9_epoch.ckpt` в папку `models/`
-            4. Перезагрузите страницу
+            2. Нажмите "Browse files" в разделе "Загрузка модели" слева
+            3. Выберите скачанный файл `unet_9_epoch.ckpt` (до 500MB)
+            4. Дождитесь загрузки модели
         """)
         return
     
@@ -285,9 +217,9 @@ def main():
     
     # Загрузка изображения
     st.header("Загрузите изображение для сегментации")
-    uploaded_img = large_file_uploader(
-        "Перетащите изображение сюда",
-        types=["jpg", "png", "jpeg"]
+    uploaded_img = st.file_uploader(
+        "Выберите изображение", 
+        type=["jpg", "png", "jpeg"]
     )
     
     if uploaded_img is not None:
@@ -333,6 +265,44 @@ def main():
                     st.image(img, caption=metric.split(".")[0], use_container_width=True)
                 except:
                     st.warning(f"Не удалось загрузить {metric}")
+
+### ФУНКЦИИ ДЛЯ ПРЕДСКАЗАНИЯ ###
+def get_val_transform(size=256):
+    return A.Compose([
+        A.Resize(size, size),
+        A.Normalize(mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0)),
+        ToTensorV2(),
+    ])
+
+@torch.no_grad()
+def process_prediction(img_path, model, transform, threshold=0.5):
+    """Обработка одного изображения"""
+    img = np.array(Image.open(img_path).convert("RGB"))
+    inp = transform(image=img)["image"].unsqueeze(0).to(DEVICE)
+    logits = model(inp)
+    probs = torch.sigmoid(logits)[0, 0].cpu().numpy()
+    pred_mask = (probs > threshold).astype(float)
+    avg_conf = probs.mean() * 100
+    return img, pred_mask, avg_conf
+
+def create_visualization(img, pred_mask, avg_conf, alpha=0.4):
+    """Создание визуализации результатов"""
+    H, W = img.shape[:2]
+    base_img = img / 255.0
+    overlay = np.zeros((H, W, 4))
+    overlay[..., 2] = pred_mask  # Красный канал
+    overlay[..., 3] = alpha * pred_mask  # Альфа-канал
+    
+    fig, ax = plt.subplots(1, 2, figsize=(12, 6))
+    ax[0].imshow(base_img)
+    ax[0].axis("off")
+    ax[0].set_title("Исходное изображение")
+    ax[1].imshow(base_img)
+    ax[1].imshow(overlay)
+    ax[1].axis("off")
+    ax[1].set_title(f"Сегментация (уверенность: {avg_conf:.1f}%)")
+    plt.tight_layout()
+    return fig
 
 if __name__ == "__main__":
     main()
