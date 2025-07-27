@@ -1,7 +1,6 @@
 ### IMPORT ###
-import streamlit as stimport
-import os
 import streamlit as st
+import os
 import numpy as np
 from PIL import Image
 import requests
@@ -15,14 +14,14 @@ from torchmetrics.classification import Accuracy
 from pytorch_lightning import LightningModule
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+import gdown
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-### Load checkpoint ###
+### MODEL ARCHITECTURE ###
 class UNet(nn.Module):
     def __init__(self, in_channels=3, out_channels=1, features=(64,128,256,512)):
         super().__init__()
-        # определение encoder
         self.downs = nn.ModuleList()
         for f in features:
             self.downs.append(nn.Sequential(
@@ -32,14 +31,14 @@ class UNet(nn.Module):
                 nn.ReLU(inplace=True),
             ))
             in_channels = f
-        # bottleneck
+        
         self.bottleneck = nn.Sequential(
             nn.Conv2d(features[-1], features[-1]*2, 3, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(features[-1]*2, features[-1]*2, 3, padding=1),
             nn.ReLU(inplace=True),
         )
-        # decoder
+        
         self.ups = nn.ModuleList()
         for f in reversed(features):
             self.ups.append(nn.ConvTranspose2d(f*2, f, 2, stride=2))
@@ -96,23 +95,48 @@ class UNetLitModule(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
 
-# путь к чекпойнту
-ckpt_path = "../models/unet_9_epoch.ckpt"
+### MODEL DOWNLOAD ###
+@st.cache_resource
+def download_model():
+    """Загружает модель с Google Drive"""
+    MODEL_URL = "https://drive.google.com/uc?id=1zVFsP3idy0gk7JHfpnS52jdlhknCboXC"
+    MODEL_DIR = "models"
+    MODEL_NAME = "unet_9_epoch.ckpt"
+    MODEL_PATH = os.path.join(MODEL_DIR, MODEL_NAME)
+    
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    
+    if not os.path.exists(MODEL_PATH):
+        with st.spinner('Скачивание модели с Google Drive (372 МБ)...'):
+            try:
+                gdown.download(MODEL_URL, MODEL_PATH, quiet=False)
+                st.success("Модель успешно загружена!")
+            except Exception as e:
+                st.error(f"Ошибка загрузки модели: {e}")
+                st.stop()
+    
+    return MODEL_PATH
 
-# воссоздаём архитектуру (должна совпадать с той, что использовалась при обучении)
-base_model = UNet(in_channels=3, out_channels=1)  # 1 класс: лес/фон[1]
+### MODEL LOADING ###
+@st.cache_resource
+def load_model():
+    """Загружает и кэширует модель"""
+    model_path = download_model()
+    
+    base_model = UNet(in_channels=3, out_channels=1)
+    lit_model = UNetLitModule.load_from_checkpoint(
+        model_path,
+        model=base_model,
+        lr=1e-3
+    )
+    
+    lit_model.eval()
+    lit_model.freeze()
+    lit_model.to(DEVICE)
+    
+    return lit_model
 
-# восстанавливаем веса
-lit_model: LightningModule = UNetLitModule.load_from_checkpoint(
-    ckpt_path, 
-    model=base_model,       # передаём базовую сеть
-    lr=1e-3                 # остальные гиперпараметры
-)
-
-lit_model.eval()
-lit_model.freeze()          # фиксируем параметры для чистого инференса
-lit_model.to(DEVICE)
-
+### PREDICTION UTILS ###
 def get_val_transform(size: int = 256):
     return A.Compose([
         A.Resize(size, size),
@@ -120,54 +144,27 @@ def get_val_transform(size: int = 256):
         ToTensorV2(),
     ])
 
-### Predict results ###
 @torch.no_grad()
-def overlay_prediction_only(img_path: str,
-                            model: torch.nn.Module,
-                            transform=None,
-                            threshold: float = 0.5,
-                            alpha: float = 0.4,
-                            figsize: tuple = (20, 20),
-                            dpi: int = 150):
-    """
-    Отображает одно тестовое изображение с наложенной предсказанной моделью маской,
-    когда истинная маска отсутствует.
-    
-    Параметры:
-    - img_path: путь к RGB-изображению
-    - model: LitModule или nn.Module, возвращающий логиты B×1×H×W
-    - transform: функция/Albumentations.Transform, приводящая изображение к тензору C×H×W
-    - threshold: порог бинаризации вероятностей
-    - alpha: прозрачность слоя предсказанной маски
-    - figsize: размер фигуры в дюймах
-    - dpi: разрешение фигуры
-    """
-    # Загрузка и подготовка изображения
+def overlay_prediction_only(img_path: str, model: torch.nn.Module, transform=None, 
+                          threshold: float = 0.5, alpha: float = 0.4,
+                          figsize: tuple = (20, 20), dpi: int = 150):
     img = np.array(Image.open(img_path).convert("RGB"))
     H, W = img.shape[:2]
-    inp = transform(image=img)["image"].unsqueeze(0).to(next(model.parameters()).device)  # B×C×h×w
+    inp = transform(image=img)["image"].unsqueeze(0).to(DEVICE)
     
-    # Предсказание вероятностей и бинаризация
-    logits = model(inp)                       # B×1×h×w
-    probs  = torch.sigmoid(logits)[0, 0].cpu().numpy()  # h×w
-    pred_mask = (probs > threshold).astype(float)      # h×w
-
-    # Усреднённая уверенность по всем пикселям
-    avg_conf = probs.mean() * 100  # в процентах
+    logits = model(inp)
+    probs  = torch.sigmoid(logits)[0, 0].cpu().numpy()
+    pred_mask = (probs > threshold).astype(float)
+    avg_conf = probs.mean() * 100
     
-    # Приведение маски к размеру оригинала, если трансформ масштабировал
     pred_mask_img = Image.fromarray((pred_mask * 255).astype(np.uint8)).resize((W, H), resample=Image.NEAREST)
-    pred_mask = np.array(pred_mask_img) / 255.0        # H×W
+    pred_mask = np.array(pred_mask_img) / 255.0
     
-    # Подготовка фонового изображения
     base_img = img / 255.0
-    
-    # Создание RGBA-слоя для предсказанной маски (зелёный)
     overlay = np.zeros((H, W, 4))
-    overlay[..., 2] = pred_mask     # зелёный канал
-    overlay[..., 3] = alpha * pred_mask  # альфа-канал
+    overlay[..., 2] = pred_mask
+    overlay[..., 3] = alpha * pred_mask
     
-    # Визуализация
     fig, ax = plt.subplots(2, 1, figsize=figsize, dpi=dpi)
     ax[0].imshow(base_img)
     ax[1].imshow(base_img)
@@ -178,78 +175,46 @@ def overlay_prediction_only(img_path: str,
     ax[1].set_title(f"Изображение с предсказанием (уверенность модели {avg_conf:.1f}%)")
     return fig
 
-### Streamlit-приложение ###
-
-@st.cache_resource
-def load_model(ckpt_path: str):
-    """Кэшируем модель, чтобы не перезагружать."""
-    base = UNet(in_channels=3, out_channels=1)
-    lit  = UNetLitModule.load_from_checkpoint(
-        ckpt_path,
-        in_channels=3, out_channels=1, lr=1e-3
-    )
-    lit.eval()
-    lit.freeze()
-    lit.to(DEVICE)
-
-    return lit
-
+### STREAMLIT APP ###
 def main():
-    st.title("UNet модель обученная на сегментацию изображений аэрофотоснимков лесов")
-
+    st.title("UNet модель для сегментации аэрофотоснимков лесов")
+    
+    # Автоматическая загрузка модели при старте
+    if "model" not in st.session_state:
+        st.session_state.model = load_model()
+    
     st.sidebar.header("Параметры")
-    ckpt_path = st.sidebar.text_input("Путь к .ckpt", value="../models/unet_9_epoch.ckpt")
-    if st.sidebar.button("Загрузить модель"):
-        if os.path.isfile(ckpt_path):
-            st.session_state.model = load_model(ckpt_path)
-            st.success("Модель загружена")
-        else:
-            st.error("Чекпойнт не найден")
-
     threshold = st.sidebar.slider("Threshold", 0.0, 1.0, 0.5, 0.01)
-    alpha     = st.sidebar.slider("Прозрачность", 0.0, 1.0, 0.4, 0.05)
+    alpha = st.sidebar.slider("Прозрачность", 0.0, 1.0, 0.4, 0.05)
 
     uploaded = st.file_uploader("Загрузите изображение", type=["jpg","png","jpeg"])
     if uploaded:
-        # Конвертируем загруженный файл в PIL.Image и numpy-массив
         img_pil = Image.open(uploaded).convert("RGB")
         tmp_path = "tmp_input.png"
         img_pil.save(tmp_path)
-        # Теперь можно показать входное изображение
-        # st.image(img_pil, caption="Входное изображение", use_container_width=True)
+        
+        fig = overlay_prediction_only(
+            img_path=tmp_path,
+            model=st.session_state.model,
+            transform=get_val_transform(),
+            threshold=threshold,
+            alpha=alpha
+        )
+        st.pyplot(fig)
 
-        if "model" in st.session_state:
-            fig = overlay_prediction_only(
-                img_path=tmp_path,
-                model=st.session_state.model,
-                transform=get_val_transform(),
-                threshold=threshold,
-                alpha=alpha
-            )
-            st.pyplot(fig)
-        else:
-            st.warning("Сначала загрузите модель")
-
-    # Отображение метрик из папки images/unet
-    metrics_dir = "../images/unet"  # путь к вашей папке с картинками
+    # Отображение метрик
+    metrics_dir = "images/unet"
     if os.path.isdir(metrics_dir):
         st.header("Метрики обучения")
-        img_files = sorted(
-            f for f in os.listdir(metrics_dir)
-            if f.lower().endswith((".png", ".jpg", ".jpeg", ".gif"))
-        )
-        for img_name in img_files:
-            img_path = os.path.join(metrics_dir, img_name)
-            caption = os.path.splitext(img_name)[0]
-            # выводим каждую картинку отдельно, сверху вниз, с увеличенной шириной
-            st.image(
-                Image.open(img_path),
-                caption=caption,
-                use_container_width=False,
-                width=800  # задаёт ширину в пикселях
-            )
-    else:
-        st.warning(f"Папка с метриками не найдена: {metrics_dir}")
+        for img_name in sorted(os.listdir(metrics_dir)):
+            if img_name.lower().endswith((".png", ".jpg", ".jpeg", ".gif")):
+                img_path = os.path.join(metrics_dir, img_name)
+                st.image(
+                    Image.open(img_path),
+                    caption=os.path.splitext(img_name)[0],
+                    use_container_width=False,
+                    width=800
+                )
 
 if __name__ == "__main__":
     main()
