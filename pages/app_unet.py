@@ -11,13 +11,20 @@ from torchmetrics.classification import Accuracy
 from pytorch_lightning import LightningModule
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-import gdown
+import zipfile
+import io
+import shutil
 
-# Инициализация Streamlit (должен быть первым)
+# Увеличиваем лимит размера загружаемых файлов до 500MB
+from streamlit.runtime.uploaded_file_manager import UploadedFile
+UploadedFile._max_size = 500 * 1024 * 1024  # 500MB
+
+# Инициализация Streamlit
 st.set_page_config(page_title="UNet Segmentation", layout="wide")
 
 # Проверяем доступность GPU
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+st.info(f"Используется устройство: {DEVICE.upper()}")
 
 ### MODEL ARCHITECTURE (без изменений) ###
 class UNet(nn.Module):
@@ -96,12 +103,11 @@ class UNetLitModule(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
 
-### МОДИФИЦИРОВАННАЯ ЗАГРУЗКА МОДЕЛИ ###
+### УЛУЧШЕННАЯ ЗАГРУЗКА МОДЕЛИ ###
 @st.cache_resource
 def load_model_from_path(model_path):
     """Загружает модель из указанного пути"""
     try:
-        # Проверка файла модели
         if not os.path.exists(model_path):
             st.error(f"Файл модели не найден: {model_path}")
             return None
@@ -110,33 +116,51 @@ def load_model_from_path(model_path):
             st.error("Файл модели пустой. Удалите его и попробуйте снова.")
             return None
         
-        # Загрузка модели
-        model = UNetLitModule.load_from_checkpoint(
-            model_path,
-            map_location=DEVICE
-        )
-        
+        model = UNetLitModule.load_from_checkpoint(model_path, map_location=DEVICE)
         model.eval()
         model.freeze()
         model.to(DEVICE)
-        
         return model
         
     except Exception as e:
         st.error(f"Ошибка при загрузке модели: {str(e)}")
         return None
 
-def get_default_model():
-    """Пытается загрузить модель по умолчанию"""
+def setup_model_directory():
+    """Создает папку для моделей и возвращает путь"""
     MODEL_DIR = "models"
-    MODEL_NAME = "unet_9_epoch.ckpt"
-    MODEL_PATH = os.path.join(MODEL_DIR, MODEL_NAME)
-    
     os.makedirs(MODEL_DIR, exist_ok=True)
+    return MODEL_DIR
+
+def extract_zip_model(zip_file):
+    """Извлекает модель из zip-архива"""
+    MODEL_DIR = setup_model_directory()
+    temp_path = os.path.join(MODEL_DIR, "unet_9_epoch.ckpt")
     
-    if os.path.exists(MODEL_PATH):
-        return load_model_from_path(MODEL_PATH)
-    return None
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_file.getvalue())) as z:
+            for filename in z.namelist():
+                if filename.endswith('.ckpt'):
+                    with z.open(filename) as f, open(temp_path, 'wb') as out:
+                        shutil.copyfileobj(f, out)
+                    return temp_path
+        return None
+    except Exception as e:
+        st.error(f"Ошибка распаковки архива: {str(e)}")
+        return None
+
+def handle_model_upload(uploaded_file):
+    """Обрабатывает загруженный файл модели"""
+    MODEL_DIR = setup_model_directory()
+    
+    if uploaded_file.name.endswith('.zip'):
+        model_path = extract_zip_model(uploaded_file)
+    else:
+        model_path = os.path.join(MODEL_DIR, "unet_9_epoch.ckpt")
+        with open(model_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+    
+    return model_path
 
 ### ФУНКЦИИ ДЛЯ ПРЕДСКАЗАНИЯ ###
 def get_val_transform(size=256):
@@ -150,121 +174,91 @@ def get_val_transform(size=256):
 def process_prediction(img_path, model, transform, threshold=0.5):
     """Обработка одного изображения"""
     img = np.array(Image.open(img_path).convert("RGB"))
-    H, W = img.shape[:2]
-    
-    # Преобразование изображения
     inp = transform(image=img)["image"].unsqueeze(0).to(DEVICE)
-    
-    # Предсказание
     logits = model(inp)
     probs = torch.sigmoid(logits)[0, 0].cpu().numpy()
     pred_mask = (probs > threshold).astype(float)
     avg_conf = probs.mean() * 100
-    
     return img, pred_mask, avg_conf
 
 def create_visualization(img, pred_mask, avg_conf, alpha=0.4):
     """Создание визуализации результатов"""
     H, W = img.shape[:2]
     base_img = img / 255.0
-    
-    # Создание маски с прозрачностью
     overlay = np.zeros((H, W, 4))
     overlay[..., 2] = pred_mask  # Красный канал
     overlay[..., 3] = alpha * pred_mask  # Альфа-канал
     
-    # Создание фигуры
     fig, ax = plt.subplots(1, 2, figsize=(12, 6))
-    
-    # Оригинальное изображение
     ax[0].imshow(base_img)
     ax[0].axis("off")
     ax[0].set_title("Исходное изображение")
-    
-    # Результат сегментации
     ax[1].imshow(base_img)
     ax[1].imshow(overlay)
     ax[1].axis("off")
     ax[1].set_title(f"Сегментация (уверенность: {avg_conf:.1f}%)")
-    
     plt.tight_layout()
     return fig
 
 ### ОСНОВНОЕ ПРИЛОЖЕНИЕ ###
 def main():
     st.title("UNet модель для сегментации аэрофотоснимков лесов")
-    st.info(f"Используется устройство: {DEVICE.upper()}")
     
-    # Добавляем возможность загрузки модели вручную
+    # Инициализация состояния сессии
+    if "model" not in st.session_state:
+        st.session_state.model = None
+        st.session_state.transform = get_val_transform()
+    
+    # Сайдбар для загрузки модели
     st.sidebar.header("Загрузка модели")
     model_file = st.sidebar.file_uploader(
-        "Загрузите модель (unet_9_epoch.ckpt)", 
-        type=["ckpt", "pth"],
-        help="Скачайте модель по ссылке: https://drive.google.com/uc?export=download&id=1zVFsP3idy0gk7JHfpnS52jdlhknCboXC"
+        "Загрузите модель (unet_9_epoch.ckpt или .zip)", 
+        type=["ckpt", "zip"],
+        help="""Модель можно скачать по ссылке и загрузить как файл .ckpt или .zip:
+               https://drive.google.com/uc?export=download&id=1zVFsP3idy0gk7JHfpnS52jdlhknCboXC"""
     )
     
-    # Инициализация модели
-    if "model" not in st.session_state:
-        # Сначала пробуем загрузить модель по умолчанию
-        default_model = get_default_model()
-        if default_model is not None:
-            st.session_state.model = default_model
-            st.session_state.transform = get_val_transform()
-            st.sidebar.success("Используется модель по умолчанию")
-        else:
-            st.session_state.model = None
-    
-    # Если пользователь загрузил свою модель
+    # Обработка загруженной модели
     if model_file is not None:
-        try:
-            # Сохраняем временный файл модели
-            MODEL_DIR = "models"
-            os.makedirs(MODEL_DIR, exist_ok=True)
-            temp_model_path = os.path.join(MODEL_DIR, "uploaded_model.ckpt")
-            
-            with open(temp_model_path, "wb") as f:
-                f.write(model_file.getbuffer())
-            
-            # Загружаем модель
-            with st.spinner("Загрузка модели..."):
-                uploaded_model = load_model_from_path(temp_model_path)
-                if uploaded_model is not None:
-                    st.session_state.model = uploaded_model
-                    st.session_state.transform = get_val_transform()
+        with st.spinner("Обработка модели..."):
+            model_path = handle_model_upload(model_file)
+            if model_path:
+                st.session_state.model = load_model_from_path(model_path)
+                if st.session_state.model:
                     st.sidebar.success("Модель успешно загружена!")
-        except Exception as e:
-            st.sidebar.error(f"Ошибка загрузки модели: {str(e)}")
+                else:
+                    st.sidebar.error("Ошибка загрузки модели")
     
-    # Проверяем, загружена ли модель
-    if st.session_state.get("model") is None:
-        st.warning("Модель не загружена. Пожалуйста, загрузите модель в разделе 'Загрузка модели'")
+    # Проверка загруженной модели
+    if st.session_state.model is None:
+        st.warning("Модель не загружена. Пожалуйста, загрузите модель")
         st.markdown("""
-            ### Инструкция по загрузке модели:
-            1. Скачайте модель по [этой ссылке](https://drive.google.com/uc?export=download&id=1zVFsP3idy0gk7JHfpnS52jdlhknCboXC)
-            2. Нажмите "Browse files" в разделе "Загрузка модели" слева
-            3. Выберите скачанный файл `unet_9_epoch.ckpt`
-            4. Дождитесь загрузки модели
+            ### Инструкция:
+            1. Скачайте модель по [ссылке](https://drive.google.com/uc?export=download&id=1zVFsP3idy0gk7JHfpnS52jdlhknCboXC)
+            2. Загрузите файл (можно в ZIP-архиве) через форму слева
+            3. Или поместите файл `unet_9_epoch.ckpt` в папку `models/`
+            4. Перезагрузите страницу
         """)
         return
     
-    # Параметры в сайдбаре
+    # Параметры сегментации
     st.sidebar.header("Параметры сегментации")
     threshold = st.sidebar.slider("Порог уверенности", 0.0, 1.0, 0.5, 0.01)
     alpha = st.sidebar.slider("Прозрачность маски", 0.0, 1.0, 0.4, 0.05)
     
     # Загрузка изображения
     st.header("Загрузите изображение для сегментации")
-    uploaded = st.file_uploader("Выберите файл", type=["jpg", "png", "jpeg"])
+    uploaded_img = st.file_uploader("Выберите изображение", type=["jpg", "png", "jpeg"])
     
-    if uploaded is not None:
+    if uploaded_img is not None:
         try:
-            # Сохраняем временный файл
-            temp_path = "temp_input.png"
-            with open(temp_path, "wb") as f:
-                f.write(uploaded.getbuffer())
-            
-            # Обработка изображения
             with st.spinner("Анализ изображения..."):
+                # Сохраняем временный файл
+                temp_path = "temp_input.png"
+                with open(temp_path, "wb") as f:
+                    f.write(uploaded_img.getbuffer())
+                
+                # Обработка изображения
                 img, pred_mask, avg_conf = process_prediction(
                     temp_path,
                     st.session_state.model,
@@ -272,17 +266,18 @@ def main():
                     threshold
                 )
                 
+                # Визуализация
                 fig = create_visualization(img, pred_mask, avg_conf, alpha)
                 st.pyplot(fig)
                 plt.close(fig)
-            
-            # Расчет площади
-            tumor_area = pred_mask.sum()
-            st.info(f"Обнаружена площадь: {tumor_area:.0f} пикселей ({tumor_area/(img.shape[0]*img.shape[1]):.1%} изображения)")
-            
-            # Удаление временного файла
-            os.remove(temp_path)
-            
+                
+                # Расчет площади
+                area = pred_mask.sum()
+                st.info(f"Обнаружена площадь: {area:.0f} пикселей ({area/(img.shape[0]*img.shape[1]):.1%} изображения)")
+                
+                # Удаление временного файла
+                os.remove(temp_path)
+                
         except Exception as e:
             st.error(f"Ошибка обработки: {str(e)}")
     
@@ -291,9 +286,7 @@ def main():
     metrics_dir = "images/unet"
     if os.path.exists(metrics_dir):
         cols = st.columns(2)
-        metrics = sorted([f for f in os.listdir(metrics_dir) if f.endswith((".png", ".jpg", ".jpeg"))])
-        
-        for i, metric in enumerate(metrics):
+        for i, metric in enumerate(sorted(f for f in os.listdir(metrics_dir) if f.endswith((".png", ".jpg", ".jpeg")))):
             with cols[i % 2]:
                 try:
                     img = Image.open(os.path.join(metrics_dir, metric))
