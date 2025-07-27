@@ -9,3 +9,4 @@ opencv-python
 pillow
 requests
 gdown
+opencv-python-headless>=4.5.0
