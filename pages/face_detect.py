@@ -26,10 +26,23 @@ def validate_image(image):
 def display_image(image, caption):
     """Безопасное отображение изображения"""
     if validate_image(image):
-        st.image(image, caption=caption, use_container_width=True)
+        # Убрано use_container_width для совместимости
+        st.image(image, caption=caption)
         return True
     st.error("Invalid image format")
     return False
+
+def safe_image_display(image_path, caption):
+    """Загрузка и отображение изображения из файла"""
+    try:
+        if os.path.exists(image_path):
+            img = Image.open(image_path)
+            return display_image(img, caption)
+        st.warning(f"Image not found: {image_path}")
+        return False
+    except Exception as e:
+        st.error(f"Error loading image: {str(e)}")
+        return False
 
 # --- Загрузка модели ---
 @st.cache_resource
@@ -76,6 +89,65 @@ def process_image(input_image, model):
         st.error(f"Processing error: {str(e)}")
         return None
 
+# --- Отображение метрик ---
+def show_f1_analysis():
+    st.subheader("F1-Confidence Curve")
+    if safe_image_display(os.path.join(IMAGE_DIR, "BoxF1_curveSP.png"), ""):
+        st.markdown("""
+        - Peak F1=0.85 at confidence=0.33
+        - Optimal range: 0.3-0.4
+        """)
+
+def show_precision_analysis():
+    st.subheader("Precision Curve")
+    if safe_image_display(os.path.join(IMAGE_DIR, "BoxP_curveSP.png"), ""):
+        st.markdown("""
+        - Max precision 1.0 at confidence=0.93
+        - Recommended range: 0.6-0.8
+        """)
+
+def show_recall_analysis():
+    st.subheader("Recall Curve")
+    if safe_image_display(os.path.join(IMAGE_DIR, "BoxR_curveSP.png"), ""):
+        st.markdown("""
+        - Max recall 0.93 at confidence=0
+        - For screening: confidence < 0.2
+        """)
+
+def show_pr_curve():
+    st.subheader("PR Curve")
+    if safe_image_display(os.path.join(IMAGE_DIR, "BoxPR_curveSP.png"), ""):
+        st.markdown("""
+        - mAP@0.5 = 0.879
+        - Good performance up to Recall=0.85
+        """)
+
+def show_confusion_matrices():
+    st.subheader("Confusion Matrices")
+    cols = st.columns(2)
+    with cols[0]:
+        safe_image_display(os.path.join(IMAGE_DIR, "confusion_matrixSP.png"), "Confusion Matrix")
+    with cols[1]:
+        safe_image_display(os.path.join(IMAGE_DIR, "confusion_matrix_normalizedSP.png"), "Normalized Matrix")
+
+def show_map_metrics():
+    st.subheader("Training Progress")
+    try:
+        epochs = list(range(1, 21))
+        map50 = [0.775, 0.793, 0.798, 0.816, 0.828, 0.838, 0.844, 0.848, 0.853, 0.857,
+                 0.857, 0.863, 0.862, 0.867, 0.868, 0.871, 0.874, 0.875, 0.877, 0.879]
+        map50_95 = [0.464, 0.482, 0.504, 0.517, 0.525, 0.537, 0.551, 0.549, 0.558, 0.560,
+                    0.561, 0.564, 0.564, 0.568, 0.575, 0.578, 0.582, 0.580, 0.585, 0.586]
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.plot(epochs, map50, label='mAP50')
+        ax.plot(epochs, map50_95, label='mAP50-95')
+        ax.set_title('Training Metrics')
+        ax.legend()
+        st.pyplot(fig)
+    except Exception as e:
+        st.error(f"Error plotting metrics: {str(e)}")
+
 # --- Основной интерфейс ---
 def main():
     model = load_model(MODEL_PATH)
@@ -108,50 +180,13 @@ def main():
             st.error(f"Error loading image: {str(e)}")
     
     # Отображение метрик
-    show_metrics()
-
-def show_metrics():
-    st.header("Model Performance Metrics")
-    
-    metrics = [
-        ("BoxF1_curveSP.png", "F1-Confidence Curve", "F1 score analysis..."),
-        ("BoxP_curveSP.png", "Precision Curve", "Precision analysis..."),
-        ("BoxR_curveSP.png", "Recall Curve", "Recall analysis..."),
-        ("BoxPR_curveSP.png", "PR Curve", "PR curve analysis..."),
-        ("confusion_matrixSP.png", "Confusion Matrix", "Confusion matrix analysis..."),
-        ("confusion_matrix_normalizedSP.png", "Normalized Confusion Matrix", "Normalized matrix analysis...")
-    ]
-    
-    for metric in metrics:
-        try:
-            image_path = os.path.join(IMAGE_DIR, metric[0])
-            if os.path.exists(image_path):
-                img = Image.open(image_path)
-                st.subheader(metric[1])
-                display_image(img, metric[1])
-                st.markdown(metric[2])
-            else:
-                st.warning(f"Image not found: {metric[0]}")
-        except Exception as e:
-            st.error(f"Error displaying {metric[1]}: {str(e)}")
-    
-    # График mAP
-    try:
-        st.subheader("mAP Metrics Over Epochs")
-        epochs = list(range(1, 21))
-        map50 = [0.775, 0.793, 0.798, 0.816, 0.828, 0.838, 0.844, 0.848, 0.853, 0.857,
-                 0.857, 0.863, 0.862, 0.867, 0.868, 0.871, 0.874, 0.875, 0.877, 0.879]
-        map50_95 = [0.464, 0.482, 0.504, 0.517, 0.525, 0.537, 0.551, 0.549, 0.558, 0.560,
-                    0.561, 0.564, 0.564, 0.568, 0.575, 0.578, 0.582, 0.580, 0.585, 0.586]
-
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.plot(epochs, map50, label='mAP50')
-        ax.plot(epochs, map50_95, label='mAP50-95')
-        ax.set_title('Training Metrics')
-        ax.legend()
-        st.pyplot(fig)
-    except Exception as e:
-        st.error(f"Error plotting metrics: {str(e)}")
+    st.header("Model Performance")
+    show_f1_analysis()
+    show_precision_analysis()
+    show_recall_analysis()
+    show_pr_curve()
+    show_confusion_matrices()
+    show_map_metrics()
 
 if __name__ == "__main__":
     main()
