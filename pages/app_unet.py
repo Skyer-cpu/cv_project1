@@ -96,52 +96,19 @@ class UNetLitModule(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
 
-### УЛУЧШЕННАЯ ЗАГРУЗКА МОДЕЛИ ###
+### МОДИФИЦИРОВАННАЯ ЗАГРУЗКА МОДЕЛИ ###
 @st.cache_resource
-def download_model():
-    """Загружает модель с Google Drive"""
-    MODEL_ID = "1zVFsP3idy0gk7JHfpnS52jdlhknCboXC"
-    MODEL_DIR = "models"
-    MODEL_NAME = "unet_9_epoch.ckpt"
-    MODEL_PATH = os.path.join(MODEL_DIR, MODEL_NAME)
-    
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    
-    if not os.path.exists(MODEL_PATH):
-        try:
-            with st.spinner('Скачивание модели с Google Drive (372 МБ)...'):
-                # Альтернативный способ скачивания больших файлов
-                output = f"{MODEL_DIR}/{MODEL_NAME}"
-                gdown.download(f"https://drive.google.com/uc?id={MODEL_ID}", output, quiet=False)
-                
-                # Проверка успешности скачивания
-                if not os.path.exists(MODEL_PATH):
-                    st.error("Файл модели не был скачан. Попробуйте вручную:")
-                    st.markdown(f"[Скачать модель](https://drive.google.com/uc?export=download&id={MODEL_ID})")
-                    st.stop()
-                    
-                st.success("Модель успешно загружена!")
-        except Exception as e:
-            st.error(f"Ошибка загрузки модели: {e}")
-            st.error("Попробуйте вручную скачать модель и поместить в папку models/")
-            st.stop()
-    
-    return MODEL_PATH
-
-@st.cache_resource
-def load_model():
-    """Загружает и кэширует модель"""
+def load_model_from_path(model_path):
+    """Загружает модель из указанного пути"""
     try:
-        model_path = download_model()
-        
         # Проверка файла модели
         if not os.path.exists(model_path):
             st.error(f"Файл модели не найден: {model_path}")
-            st.stop()
+            return None
             
         if os.path.getsize(model_path) == 0:
             st.error("Файл модели пустой. Удалите его и попробуйте снова.")
-            st.stop()
+            return None
         
         # Загрузка модели
         model = UNetLitModule.load_from_checkpoint(
@@ -156,8 +123,20 @@ def load_model():
         return model
         
     except Exception as e:
-        st.error(f"Критическая ошибка при загрузке модели: {str(e)}")
-        st.stop()
+        st.error(f"Ошибка при загрузке модели: {str(e)}")
+        return None
+
+def get_default_model():
+    """Пытается загрузить модель по умолчанию"""
+    MODEL_DIR = "models"
+    MODEL_NAME = "unet_9_epoch.ckpt"
+    MODEL_PATH = os.path.join(MODEL_DIR, MODEL_NAME)
+    
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    
+    if os.path.exists(MODEL_PATH):
+        return load_model_from_path(MODEL_PATH)
+    return None
 
 ### ФУНКЦИИ ДЛЯ ПРЕДСКАЗАНИЯ ###
 def get_val_transform(size=256):
@@ -216,11 +195,57 @@ def main():
     st.title("UNet модель для сегментации аэрофотоснимков лесов")
     st.info(f"Используется устройство: {DEVICE.upper()}")
     
-    # Загрузка модели
+    # Добавляем возможность загрузки модели вручную
+    st.sidebar.header("Загрузка модели")
+    model_file = st.sidebar.file_uploader(
+        "Загрузите модель (unet_9_epoch.ckpt)", 
+        type=["ckpt", "pth"],
+        help="Скачайте модель по ссылке: https://drive.google.com/uc?export=download&id=1zVFsP3idy0gk7JHfpnS52jdlhknCboXC"
+    )
+    
+    # Инициализация модели
     if "model" not in st.session_state:
-        with st.spinner("Загрузка модели..."):
-            st.session_state.model = load_model()
+        # Сначала пробуем загрузить модель по умолчанию
+        default_model = get_default_model()
+        if default_model is not None:
+            st.session_state.model = default_model
             st.session_state.transform = get_val_transform()
+            st.sidebar.success("Используется модель по умолчанию")
+        else:
+            st.session_state.model = None
+    
+    # Если пользователь загрузил свою модель
+    if model_file is not None:
+        try:
+            # Сохраняем временный файл модели
+            MODEL_DIR = "models"
+            os.makedirs(MODEL_DIR, exist_ok=True)
+            temp_model_path = os.path.join(MODEL_DIR, "uploaded_model.ckpt")
+            
+            with open(temp_model_path, "wb") as f:
+                f.write(model_file.getbuffer())
+            
+            # Загружаем модель
+            with st.spinner("Загрузка модели..."):
+                uploaded_model = load_model_from_path(temp_model_path)
+                if uploaded_model is not None:
+                    st.session_state.model = uploaded_model
+                    st.session_state.transform = get_val_transform()
+                    st.sidebar.success("Модель успешно загружена!")
+        except Exception as e:
+            st.sidebar.error(f"Ошибка загрузки модели: {str(e)}")
+    
+    # Проверяем, загружена ли модель
+    if st.session_state.get("model") is None:
+        st.warning("Модель не загружена. Пожалуйста, загрузите модель в разделе 'Загрузка модели'")
+        st.markdown("""
+            ### Инструкция по загрузке модели:
+            1. Скачайте модель по [этой ссылке](https://drive.google.com/uc?export=download&id=1zVFsP3idy0gk7JHfpnS52jdlhknCboXC)
+            2. Нажмите "Browse files" в разделе "Загрузка модели" слева
+            3. Выберите скачанный файл `unet_9_epoch.ckpt`
+            4. Дождитесь загрузки модели
+        """)
+        return
     
     # Параметры в сайдбаре
     st.sidebar.header("Параметры сегментации")
@@ -272,11 +297,9 @@ def main():
             with cols[i % 2]:
                 try:
                     img = Image.open(os.path.join(metrics_dir, metric))
-                    # Заменено use_column_width на use_container_width
                     st.image(img, caption=metric.split(".")[0], use_container_width=True)
                 except:
                     st.warning(f"Не удалось загрузить {metric}")
 
 if __name__ == "__main__":
     main()
-
