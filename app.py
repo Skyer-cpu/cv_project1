@@ -1,12 +1,16 @@
+import os
+os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'  # Решает проблемы с OpenCV
+os.environ['DISPLAY'] = ':0'  # Эмулирует display для headless-режима
+
 try:
-    from ultralytics import YOLO
     import cv2
-except ImportError:
+    from ultralytics import YOLO
+except ImportError as e:
     import subprocess
     import sys
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
-    from ultralytics import YOLO
+    subprocess.run([sys.executable, "-m", "pip", "install", "opencv-python-headless==4.9.0.80", "ultralytics==8.1.0"], check=True)
     import cv2
+    from ultralytics import YOLO
 import streamlit as st
 from PIL import Image
 import pandas as pd
