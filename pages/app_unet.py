@@ -14,6 +14,7 @@ from albumentations.pytorch import ToTensorV2
 import zipfile
 import io
 import shutil
+from pathlib import Path
 
 # Увеличиваем лимит размера загружаемых файлов до 500MB
 from streamlit.runtime.uploaded_file_manager import UploadedFile
@@ -26,7 +27,7 @@ st.set_page_config(page_title="UNet Segmentation", layout="wide")
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 st.info(f"Используется устройство: {DEVICE.upper()}")
 
-### MODEL ARCHITECTURE (без изменений) ###
+### MODEL ARCHITECTURE ###
 class UNet(nn.Module):
     def __init__(self, in_channels=3, out_channels=1, features=(64,128,256,512)):
         super().__init__()
@@ -162,6 +163,40 @@ def handle_model_upload(uploaded_file):
     
     return model_path
 
+### КАСТОМНЫЙ ЗАГРУЗЧИК ФАЙЛОВ ###
+def large_file_uploader(label, types, help_text=None):
+    """Кастомный загрузчик файлов с правильным сообщением о лимите"""
+    # Создаем контейнер для кастомного интерфейса
+    container = st.empty()
+    
+    # Используем стандартный загрузчик, но с нашим увеличенным лимитом
+    uploaded_file = st.file_uploader(
+        label,
+        type=types,
+        help=help_text,
+        label_visibility="collapsed"  # Скрываем стандартный лейбл
+    )
+    
+    # Кастомное отображение информации о загрузке
+    if uploaded_file is None:
+        container.markdown(f"""
+            <div style='
+                border: 2px dashed #ccc;
+                border-radius: 5px;
+                padding: 25px;
+                text-align: center;
+                margin-bottom: 10px;
+            '>
+                <p>{label}</p>
+                <p style='font-size: 0.8em; color: #666;'>Поддерживаемые форматы: {', '.join(types)}</p>
+                <p style='font-size: 0.8em; color: #666;'>Максимальный размер: 500MB</p>
+            </div>
+        """, unsafe_allow_html=True)
+    else:
+        container.empty()
+        
+    return uploaded_file
+
 ### ФУНКЦИИ ДЛЯ ПРЕДСКАЗАНИЯ ###
 def get_val_transform(size=256):
     return A.Compose([
@@ -211,11 +246,13 @@ def main():
     
     # Сайдбар для загрузки модели
     st.sidebar.header("Загрузка модели")
-    model_file = st.sidebar.file_uploader(
-        "Загрузите модель (unet_9_epoch.ckpt или .zip)", 
-        type=["ckpt", "zip"],
-        help="""Модель можно скачать по ссылке и загрузить как файл .ckpt или .zip:
-               https://drive.google.com/uc?export=download&id=1zVFsP3idy0gk7JHfpnS52jdlhknCboXC"""
+    
+    # Используем кастомный загрузчик
+    model_file = large_file_uploader(
+        "Перетащите файл модели сюда (unet_9_epoch.ckpt или .zip)",
+        types=["ckpt", "zip"],
+        help_text="""Модель можно скачать по ссылке:
+                   https://drive.google.com/uc?export=download&id=1zVFsP3idy0gk7JHfpnS52jdlhknCboXC"""
     )
     
     # Обработка загруженной модели
@@ -235,7 +272,7 @@ def main():
         st.markdown("""
             ### Инструкция:
             1. Скачайте модель по [ссылке](https://drive.google.com/uc?export=download&id=1zVFsP3idy0gk7JHfpnS52jdlhknCboXC)
-            2. Загрузите файл (можно в ZIP-архиве) через форму слева
+            2. Перетащите файл в область загрузки слева (можно ZIP-архив)
             3. Или поместите файл `unet_9_epoch.ckpt` в папку `models/`
             4. Перезагрузите страницу
         """)
@@ -248,7 +285,10 @@ def main():
     
     # Загрузка изображения
     st.header("Загрузите изображение для сегментации")
-    uploaded_img = st.file_uploader("Выберите изображение", type=["jpg", "png", "jpeg"])
+    uploaded_img = large_file_uploader(
+        "Перетащите изображение сюда",
+        types=["jpg", "png", "jpeg"]
+    )
     
     if uploaded_img is not None:
         try:
