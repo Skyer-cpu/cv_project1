@@ -202,9 +202,9 @@ def create_visualization(img, pred_mask, avg_conf, alpha=0.4):
     if img.max() > 1.0:
         img = img.astype(np.float32) / 255.0
     
-    # Создаем overlay для маски
+    # Создаем overlay для маски (зеленый цвет)
     overlay = np.zeros((*pred_mask.shape, 4), dtype=np.float32)
-    overlay[..., 0] = 1.0  # Красный канал
+    overlay[..., 1] = 0.5  # Зеленый канал (уменьшаем интенсивность)
     overlay[..., 3] = pred_mask * alpha  # Альфа-канал
     
     # Создаем фигуру
@@ -299,6 +299,54 @@ def main():
         except Exception as e:
             st.error(f"Ошибка обработки: {str(e)}")
             st.error("Попробуйте загрузить другое изображение")
+
+    # Раздел с графиками метрик обучения
+    st.header("Метрики обучения модели")
+    
+    # Создаем 2 колонки для графиков
+    col1, col2 = st.columns(2)
+    
+    # Примеры графиков (замените на свои реальные графики)
+    with col1:
+        st.subheader("Функция потерь")
+        try:
+            loss_img = Image.open("images/unet/loss_curve.png")  # Замените на ваш путь
+            st.image(loss_img, use_column_width=True)
+        except:
+            st.warning("График функции потерь не найден")
+    
+    with col2:
+        st.subheader("Точность")
+        try:
+            acc_img = Image.open("images/unet/accuracy_curve.png")  # Замените на ваш путь
+            st.image(acc_img, use_column_width=True)
+        except:
+            st.warning("График точности не найден")
+    
+    # Дополнительные графики
+    st.subheader("Дополнительные метрики")
+    cols = st.columns(3)
+    
+    try:
+        with cols[0]:
+            iou_img = Image.open("images/unet/iou_curve.png")  # IoU метрика
+            st.image(iou_img, caption="IoU метрика", use_column_width=True)
+    except:
+        pass
+    
+    try:
+        with cols[1]:
+            dice_img = Image.open("images/unet/dice_curve.png")  # Dice коэффициент
+            st.image(dice_img, caption="Dice коэффициент", use_column_width=True)
+    except:
+        pass
+    
+    try:
+        with cols[2]:
+            conf_img = Image.open("images/unet/confusion_matrix.png")  # Матрица ошибок
+            st.image(conf_img, caption="Матрица ошибок", use_column_width=True)
+    except:
+        pass
 
 if __name__ == "__main__":
     main()
