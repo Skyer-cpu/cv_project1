@@ -1,3 +1,12 @@
+try:
+    from ultralytics import YOLO
+    import cv2
+except ImportError:
+    import subprocess
+    import sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+    from ultralytics import YOLO
+    import cv2
 import streamlit as st
 from PIL import Image
 import pandas as pd
